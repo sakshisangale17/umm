@@ -1,0 +1,95 @@
+# Language Rules Reference
+
+Language-specific correctness and idiom checks for Layers 2–3 of the review pipeline.
+Apply only the section matching the detected language.
+
+---
+
+## JavaScript / TypeScript
+
+**Correctness**
+- `==` vs `===` — loose equality causing unexpected type coercions
+- `async` function returning a value that is never `await`-ed by caller
+- `Promise` created but not returned or awaited (silent failure)
+- `Array.forEach` with `async` callback — errors are swallowed, not propagated
+- Mutating function arguments that are objects/arrays (unexpected side effects)
+- `typeof null === 'object'` — null not excluded in type checks
+
+**TypeScript-specific**
+- `as any` or `// @ts-ignore` suppressing meaningful type errors
+- Non-null assertion (`!`) on values that are plausibly null/undefined
+- Missing return type on exported functions
+- `unknown` vs `any` — prefer `unknown` for untyped external input
+
+**Idioms**
+- `var` instead of `const`/`let`
+- Callback patterns where Promises/async-await are available
+- `Array.indexOf` where `Array.includes` is clearer
+
+---
+
+## Python
+
+**Correctness**
+- Mutable default argument: `def fn(x=[])` — shared across all calls
+- Bare `except:` swallowing all exceptions including `KeyboardInterrupt`
+- `is` used for value equality instead of `==` (especially for strings/integers outside -5..256)
+- Late binding closure in loops: `lambda: i` inside a for-loop captures final value
+- `__eq__` overridden without `__hash__` — breaks use in sets/dicts
+- `dict.keys()` iterated while dict is modified
+
+**Idioms**
+- Manual index tracking where `enumerate()` applies
+- `if x == True:` instead of `if x:`
+- `str` concatenation in loops where `"".join()` applies
+- `open()` without context manager (`with` statement)
+
+---
+
+## Java
+
+**Correctness**
+- `String` compared with `==` instead of `.equals()`
+- `NullPointerException` risk: method called on object that may be null without prior check
+- `Exception` caught and silently swallowed (empty catch block)
+- Resource not closed in finally / not using try-with-resources
+- `HashMap` used in concurrent context without `ConcurrentHashMap`
+- Integer overflow in arithmetic without explicit `long` cast
+
+**Idioms**
+- Raw types used instead of generics
+- `StringBuffer` where `StringBuilder` suffices (single-threaded)
+- `System.out.println` in production code
+- Checked exceptions declared but never thrown
+
+---
+
+## Go
+
+**Correctness**
+- Error return value ignored (assignment to `_` on error)
+- Goroutine started but never joined or context-cancelled — potential goroutine leak
+- `defer` inside a loop — deferred calls accumulate until function returns, not loop iteration
+- Slice capacity confusion: `append` to nil slice vs pre-allocated slice
+- Struct copied by value when pointer receiver is intended
+
+**Idioms**
+- Returning `(bool, error)` where just `error` (nil = success) suffices
+- `fmt.Sprintf` for simple concatenation where `+` or `strings.Builder` is clearer
+- Panic used for non-exceptional control flow
+
+---
+
+## SQL
+
+**Correctness**
+- `NULL` comparison with `=` instead of `IS NULL` / `IS NOT NULL`
+- `COUNT(*)` vs `COUNT(column)` — different behavior with NULLs
+- Missing `WHERE` clause on `UPDATE` or `DELETE`
+- Non-deterministic `ORDER BY` without unique tiebreaker column
+- Implicit type coercion in `JOIN` conditions causing full table scans
+
+**Performance**
+- `SELECT *` where only specific columns are needed
+- Missing index on frequently `JOIN`ed or `WHERE`-filtered column (flag only if identifiable)
+- `LIKE '%term'` pattern preventing index use

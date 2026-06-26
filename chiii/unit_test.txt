@@ -1,0 +1,690 @@
+---
+name: java-spring-unit-test-agent
+description: >
+  Use this skill whenever the user wants to generate, write, improve, or analyse unit tests
+  for Java or Spring Boot classes. Triggers include: "generate unit tests", "write tests for",
+  "test coverage", "JUnit", "Mockito", "MockMvc", mentioning a class or package name in a
+  Java/Spring project, or asking about missing test coverage. Also trigger when the user shares
+  a Java source file and asks what should be tested. Covers Spring Boot, Spring MVC, Spring Data,
+  Spring Security, Spring WebFlux (Reactive), Kafka, Feign, and Scheduled tasks. Always use this
+  skill — do not attempt Java unit test generation from memory alone.
+compatibility:
+  tools: [bash_tool, str_replace, create_file, view]
+  language: Java 11+
+  build: Maven or Gradle
+  frameworks: Spring Boot 2.x / 3.x
+---
+
+# Java Spring Unit Test Agent
+
+A senior-engineer-level unit test generation agent for Java + Spring Boot projects.
+Operates in the **Development phase** of the SDLC.
+
+---
+
+## Core Principles
+
+1. **Read before writing** — Never generate a test without reading the source file first.
+2. **Detect before assuming** — Always inspect `pom.xml` / `build.gradle` before using any framework API.
+3. **Surface uncertainty** — Flag assumptions explicitly; never silently hallucinate behavior.
+4. **Strong assertions** — `assertNotNull` alone is never acceptable. Assert state, verify interactions.
+5. **Senior-level awareness** — Detect Spring annotations (`@Transactional`, `@Cacheable`, `@Async`, `@Retryable`) and generate tests around their contracts, not just method logic.
+
+---
+
+## Step 1 — User Prompt Flow
+
+Ask the user in this exact sequence **before reading any files**:
+
+**Prompt 1:**
+> "Which class(es) or package(s) do you want unit tests for?"
+
+Accept any of:
+- Fully-qualified name: `com.example.service.UserService`
+- Short name: `UserService`
+- Package path: `service`, `controller`, `repository`
+- Comma-separated list: `UserService, PaymentService`
+
+**Prompt 2:**
+> "Should any classes be excluded from JaCoCo coverage? (e.g. mapper, model, dto) [Enter to skip]"
+
+**Then:** Scope the full work before opening any file.
+
+---
+
+## Step 2 — Pre-Flight Checklist
+
+Complete every item before writing a single line of test code.
+
+- [ ] Resolve class name → exact file path under `src/main/java/`
+- [ ] Read source file **completely**
+- [ ] Read `pom.xml` or `build.gradle` → confirm JUnit 5, Mockito, Spring Test, and any extras (Reactor, WireMock, H2, EmbeddedKafka)
+- [ ] Detect **Spring Boot version** from `spring-boot-starter-parent` → determines `javax` vs `jakarta` namespace
+- [ ] Detect **build tool** (Maven or Gradle) → determines JaCoCo config syntax
+- [ ] Check `src/test/java/` for an existing `{ClassName}Test.java`
+  - If found → run **Existing Test Analysis** (Step 4) before generating anything
+- [ ] Read one existing test file for style reference (import order, assertion library, naming convention)
+- [ ] Identify all constructor/field-injected dependencies
+
+---
+
+## Step 3 — Java Class Type Detection
+
+Read the class annotations and determine type. **Never assume** — derive from source only.
+
+| Detected Annotation(s) | Class Type | Test Strategy |
+|---|---|---|
+| `@Service`, `@Component` | Service | Pure Mockito — `@ExtendWith(MockitoExtension.class)` |
+| `@RestController`, `@Controller` | Controller | `@WebMvcTest` + `MockMvc` + `@MockBean` |
+| `@Repository` | Repository | `@DataJpaTest` + H2 in-memory |
+| `@RestControllerAdvice` | Exception Handler | `MockMvc` exception trigger tests |
+| `@Configuration` | Config Class | Context load + bean presence assertions |
+| `@Scheduled` | Scheduled Task | Direct method invocation (no scheduler context) |
+| `@KafkaListener` | Kafka Consumer | `@EmbeddedKafka` or Mockito-isolated logic |
+| `@Async` | Async Method | `CompletableFuture` / callback assertion |
+| Returns `Mono<>` / `Flux<>` | Reactive (WebFlux) | `StepVerifier` from `reactor-test` |
+| `@FeignClient` | Feign Client | WireMock stub or Mockito mock of interface |
+| No Spring annotation, static methods | Utility Class | Plain JUnit 5, no Mockito overhead |
+| `@Entity` | JPA Entity | `@DataJpaTest` or plain constructor/getter tests |
+
+**Output this detection result** to the user before generating tests:
+```
+Class Type Detected : @Service → Pure Mockito Unit Test
+Spring Boot Version : 3.x → jakarta namespace
+Build Tool          : Maven
+```
+
+---
+
+## Step 4 — Spring Context Decision
+
+One of the most common junior developer mistakes is wrapping everything in `@SpringBootTest`.
+The agent must enforce the correct context level.
+
+**Decision logic:**
+
+```
+Does the class need the full Spring context to function?
+│
+├── NO  → @ExtendWith(MockitoExtension.class)   [preferred — fast]
+│         Use @Mock, @InjectMocks
+│         Never use @MockBean here
+│
+├── SLICE → Use the correct slice annotation
+│           @WebMvcTest          → Controllers only
+│           @DataJpaTest         → Repositories only
+│           @DataRedisTest       → Redis repositories
+│           @JsonTest            → JSON serialisation
+│
+└── YES (rare) → @SpringBootTest
+                 Only when testing wiring, config loading,
+                 or cross-layer integration
+                 Always justify this choice in a code comment
+```
+
+**Hard rules:**
+- `@MockBean` is only valid inside `@SpringBootTest` or slice tests — never with pure Mockito
+- Never add `@SpringBootTest` to a service or utility class test
+- If `@SpringBootTest` is used, add a `// REASON: full context required because [X]` comment
+
+---
+
+## Step 5 — Dependency Analysis
+
+After reading the source, extract and report all dependencies before mocking:
+
+```
+Dependencies Found in UserService:
+  UserRepository       → @Mock (JPA repository)
+  EmailService         → @Mock (internal service)
+  RestTemplate         → @Mock (HTTP client)
+
+Recommendation:
+  @InjectMocks private UserService service;
+  @Mock        private UserRepository userRepository;
+  @Mock        private EmailService emailService;
+  @Mock        private RestTemplate restTemplate;
+```
+
+**Dependency detection rules:**
+- Constructor injection → preferred, easiest to mock
+- `@Autowired` field injection → use `ReflectionTestUtils` only if truly necessary
+- `@Value` fields → always use `ReflectionTestUtils.setField(service, "fieldName", value)`
+- Static utility calls → note as untestable via Mockito; suggest refactor if critical path
+
+---
+
+## Step 6 — Code Path Discovery
+
+**This is the most important step.** Map every branch before writing any test.
+
+### Branch types to detect:
+
+**Conditionals:**
+```java
+if (user == null)          // Path 1: null | Path 2: non-null
+if (age >= 18)             // Boundaries: 17, 18, 19
+if (balance > 1000)        // Boundaries: 999, 1000, 1001
+```
+
+**Switch / Pattern match:**
+```java
+switch (status) {          // Generate one test per case
+    case ACTIVE:           // + one test for DEFAULT / unhandled
+    case INACTIVE:
+    case PENDING:
+}
+```
+
+**Loops:**
+```java
+for (Order o : orders)    // Test: empty list, single item, multiple items
+```
+
+**Optional / Null returns:**
+```java
+Optional<User> user = repo.findById(id);
+user.orElseThrow(...)      // Test: present, empty
+```
+
+**Output format — always show path map before test code:**
+```
+Code Paths Discovered in UserService.createUser():
+
+  Path 1  [NULL_INPUT]     user param is null           → expects NullPointerException / custom exception
+  Path 2  [DUPLICATE]      email already exists          → expects UserAlreadyExistsException
+  Path 3  [HAPPY_PATH]     valid user, save succeeds     → expects saved User returned
+  Path 4  [DB_FAILURE]     repo.save() throws exception  → expects ServiceException wrapped
+  Path 5  [EMAIL_FAIL]     email send fails              → expects user saved, warning logged
+
+  Total paths: 5 | Will cover: 5 | Gaps: 0
+```
+
+---
+
+## Step 7 — Boundary Analysis
+
+For every numeric or comparable condition found, generate boundary tests automatically:
+
+| Condition | Test Values |
+|---|---|
+| `x >= N` | N-1, N, N+1 |
+| `x > N` | N-1, N, N+1 |
+| `x == N` | N-1, N, N+1 |
+| `list.size() > 0` | empty list, 1 element, many elements |
+| `String` input | null, `""`, `" "` (blank), valid, max-length+1 |
+| `age`, `amount`, `count` | 0, negative, max boundary |
+
+Always annotate boundary tests with `@DisplayName` explaining the boundary:
+```java
+@Test
+@DisplayName("should reject user when age is 17 (below minimum 18)")
+void should_RejectUser_When_AgeBelowMinimum() { ... }
+```
+
+---
+
+## Step 8 — Exception Path Analysis
+
+For every `try/catch` and `throws` declaration in the source:
+
+**Pattern:**
+```java
+try {
+    repo.save(user);
+} catch (DataAccessException ex) {
+    throw new UserSaveException("Failed to save", ex);
+}
+```
+
+**Required test:**
+```java
+@Test
+@DisplayName("should throw UserSaveException when repository throws DataAccessException")
+void should_ThrowUserSaveException_When_RepoThrowsDataAccessException() {
+    // Arrange
+    when(userRepository.save(any(User.class)))
+        .thenThrow(new DataAccessException("DB error") {});
+
+    // Act & Assert
+    assertThrows(UserSaveException.class,
+        () -> service.createUser(validUser));
+
+    verify(userRepository).save(validUser);
+}
+```
+
+**Rules:**
+- Always verify the wrapper exception type, not the root cause
+- Always `verify()` that the method that threw was actually called
+- If the catch block has side effects (logging, metric increment), verify those too
+
+---
+
+## Step 9 — Existing Test Analysis
+
+When `{ClassName}Test.java` already exists, **never blindly regenerate**. Instead:
+
+1. Read the existing test file completely
+2. Extract all `@Test` method names
+3. Map them against the code paths discovered in Step 6
+4. Output a gap report:
+
+```
+Existing Test Analysis: UserServiceTest.java
+
+Already Covered:
+  ✓ should_ReturnUser_When_IdIsValid
+  ✓ should_ThrowException_When_UserNotFound
+
+Missing Coverage:
+  ✗ Null input to createUser()
+  ✗ Repository failure on save()
+  ✗ Duplicate email scenario
+  ✗ Email service failure path
+
+Action: Generate only the missing 4 tests and append to existing file.
+        Do NOT overwrite existing tests.
+```
+
+Ask user before appending:
+> "Found 2 existing tests. I'll add 4 missing scenarios. Should I append to the existing file or create a separate file?"
+
+---
+
+## Step 10 — Mock Recommendation Engine
+
+After dependency analysis, generate the full mock setup block:
+
+**Standard service test setup:**
+```java
+@ExtendWith(MockitoExtension.class)
+@DisplayName("UserService Unit Tests")
+class UserServiceTest {
+
+    @Mock
+    private UserRepository userRepository;
+
+    @Mock
+    private EmailService emailService;
+
+    @InjectMocks
+    private UserService userService;
+
+    // For @Value fields:
+    @BeforeEach
+    void setUp() {
+        ReflectionTestUtils.setField(userService, "maxRetries", 3);
+    }
+}
+```
+
+**Mock type selection rules:**
+| Dependency Type | Mock Approach |
+|---|---|
+| `JpaRepository` | `@Mock` |
+| `RestTemplate` | `@Mock` |
+| `WebClient` | `@Mock` + fluent chain stubbing |
+| `KafkaTemplate` | `@Mock` |
+| Internal `@Service` | `@Mock` |
+| `@Value` String/int field | `ReflectionTestUtils.setField()` |
+| Spring `ApplicationContext` | `@MockBean` (slice test only) |
+| Static utility class | Refactor note + PowerMock warning |
+
+---
+
+## Step 11 — Assertion Recommendation Engine
+
+**Weak assertions are rejected.** The agent must use the strongest meaningful assertion.
+
+| Situation | Weak (Avoid) | Strong (Use) |
+|---|---|---|
+| Return value | `assertNotNull(result)` | `assertEquals("ACTIVE", result.getStatus())` |
+| Exception type | `assertThrows(Exception.class, ...)` | `assertThrows(UserNotFoundException.class, ...)` |
+| Exception message | *(skipped)* | `assertThat(ex.getMessage()).contains("User not found")` |
+| Void method side effect | *(nothing)* | `verify(repo).save(argThat(u -> u.getEmail().equals("x@y.com")))` |
+| List result | `assertFalse(result.isEmpty())` | `assertThat(result).hasSize(3).extracting(User::getName).contains("Alice")` |
+| Async result | `assertNotNull(future.get())` | `StepVerifier.create(mono).expectNextMatches(u -> u.getId() != null).verifyComplete()` |
+
+**AssertJ is preferred** over JUnit 5 assertions for complex objects.
+Use `assertThat()` from `org.assertj.core.api.Assertions`.
+
+**`ArgumentCaptor` pattern** — use when verifying what was passed to a void mock:
+```java
+ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
+verify(userRepository).save(captor.capture());
+assertThat(captor.getValue().getStatus()).isEqualTo(UserStatus.ACTIVE);
+```
+
+---
+
+## Step 12 — Spring Annotation Awareness
+
+Detect these annotations and generate contract-level tests, not just logic tests:
+
+**`@Transactional`**
+```java
+// Verify transactional boundary — method must be called within a transaction
+@Test
+void should_ExecuteWithinTransaction() {
+    // Use @Transactional on test + verify rollback on exception
+}
+```
+
+**`@Cacheable(value = "users", key = "#id")`**
+```java
+@Test
+void should_ReturnCachedResult_On_SecondCall() {
+    when(repo.findById(1L)).thenReturn(Optional.of(user));
+    service.getUser(1L);
+    service.getUser(1L); // second call
+    verify(repo, times(1)).findById(1L); // repo called only once if cache works
+}
+```
+
+**`@Async`**
+```java
+@Test
+void should_ExecuteAsynchronously() throws Exception {
+    CompletableFuture<Void> future = service.sendEmailAsync(user);
+    future.get(2, TimeUnit.SECONDS); // assert completes
+    verify(emailService).send(user.getEmail());
+}
+```
+
+**`@Retryable(maxAttempts = 3)`**
+```java
+@Test
+void should_RetryThreeTimes_Before_ThrowingException() {
+    when(externalService.call()).thenThrow(new RuntimeException("fail"));
+    assertThrows(RuntimeException.class, () -> service.callWithRetry());
+    verify(externalService, times(3)).call(); // exactly 3 attempts
+}
+```
+
+**`@PreAuthorize("hasRole('ADMIN')")`**
+```java
+@Test
+@WithMockUser(roles = "USER")
+void should_Return403_When_UserLacksAdminRole() throws Exception {
+    mockMvc.perform(delete("/api/users/1"))
+           .andExpect(status().isForbidden());
+}
+```
+
+**`@Valid` on controller params**
+```java
+@Test
+void should_Return400_When_RequestBodyIsInvalid() throws Exception {
+    mockMvc.perform(post("/api/users")
+           .contentType(MediaType.APPLICATION_JSON)
+           .content("{\"email\": \"not-an-email\"}"))
+           .andExpect(status().isBadRequest());
+}
+```
+
+---
+
+## Step 13 — Coverage Gap Detection
+
+After generating tests, output a structured gap report:
+
+```
+Coverage Gap Report: UserService
+
+Detected Code Paths : 8
+Tests Written       : 6
+Gaps Remaining      : 2
+
+Covered:
+  ✓ Path 1 — Happy path (user created successfully)
+  ✓ Path 2 — Null user input
+  ✓ Path 3 — Duplicate email
+  ✓ Path 4 — Repository failure
+  ✓ Path 5 — Email service failure
+  ✓ Path 6 — Status = ACTIVE branch
+
+Not Covered (noted for developer):
+  ✗ Path 7 — Status = SUSPENDED branch (rare, low risk)
+  ✗ Path 8 — Concurrent update race condition (requires integration test)
+
+Recommendation:
+  Path 7 → P1, can be added.
+  Path 8 → Out of scope for unit tests; suggest integration test.
+```
+
+---
+
+## Step 14 — Test Prioritization
+
+Generate tests in priority order. Always cover P0 before P1 before P2.
+
+**P0 — Must Cover First:**
+- Null input handling
+- Business rule enforcement
+- Exception paths and error wrapping
+- Security logic (`@PreAuthorize`, role checks)
+- Data mutation (save, update, delete) side effects
+
+**P1 — Cover Second:**
+- Valid happy path flows
+- All `if/else` and `switch` branches
+- Repository interaction verification
+- `@Transactional` / `@Cacheable` / `@Retryable` contracts
+
+**P2 — Cover if Time Permits:**
+- Rare edge cases (max-length strings, extreme numbers)
+- Defensive programming paths unlikely in production
+- toString / equals / hashCode on entities
+
+---
+
+## Step 15 — Test Naming Convention
+
+Follow: `should_{ExpectedBehavior}_When_{Condition}()`
+
+```java
+should_ReturnUser_When_IdIsValid()
+should_ThrowUserNotFoundException_When_IdDoesNotExist()
+should_ReturnEmptyList_When_NoUsersExist()
+should_SendEmail_When_UserIsCreated()
+should_NotCallEmailService_When_UserCreationFails()
+should_RetryThreeTimes_When_ExternalServiceFails()
+```
+
+Mirror the naming style found in existing `src/test/` files if it differs.
+
+---
+
+## Step 16 — File Placement
+
+```
+Source :  src/main/java/com/example/service/UserService.java
+Test   :  src/test/java/com/example/service/UserServiceTest.java
+```
+
+- One test class per source class
+- Mirrored package structure, always
+- If file exists: show summary → ask before modifying
+
+---
+
+## Step 17 — javax vs jakarta Namespace
+
+**Detect from `pom.xml`:**
+```xml
+<!-- Spring Boot 2.x -->
+<parent>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.x.x</version>   → use javax.*
+</parent>
+
+<!-- Spring Boot 3.x -->
+<parent>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.x.x</version>   → use jakarta.*
+</parent>
+```
+
+Never mix `javax` and `jakarta` in the same generated file. If version is undetectable, ask the user.
+
+---
+
+## Step 18 — JaCoCo Configuration
+
+Only modify `pom.xml` or `build.gradle` if the user confirmed exclusions in Step 1.
+
+**Maven — add to jacoco-maven-plugin:**
+```xml
+<configuration>
+    <excludes>
+        <exclude>**/mapper/**/*.class</exclude>
+        <exclude>**/model/**/*.class</exclude>
+        <exclude>**/dto/**/*.class</exclude>
+    </excludes>
+</configuration>
+```
+
+**Gradle — add to jacocoTestReport:**
+```groovy
+jacocoTestReport {
+    afterEvaluate {
+        classDirectories.setFrom(files(classDirectories.files.collect {
+            fileTree(dir: it, exclude: [
+                '**/mapper/**',
+                '**/model/**',
+                '**/dto/**'
+            ])
+        }))
+    }
+}
+```
+
+**Rules:**
+- Check for existing `<excludes>` block before adding — no duplicates
+- Only add exclusions confirmed by user in Step 1
+- MapStruct exclude (`**/mapper/**`) only if source imports a `*Mapper` interface
+
+---
+
+## Step 19 — Post-Generation Summary
+
+Always output this summary after generation:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Unit Test Generation Summary
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Class Tested         : UserService
+Class Type           : @Service → Pure Mockito
+Spring Boot Version  : 3.1.x (jakarta namespace)
+Build Tool           : Maven
+
+Tests Written        : 8
+  P0 (Critical)      : 4
+  P1 (Standard)      : 3
+  P2 (Edge)          : 1
+
+Coverage Paths
+  Happy Path         : 2
+  Null / Empty       : 2
+  Exception Paths    : 2
+  Branch Logic       : 1
+  Annotation Contract: 1 (@Retryable)
+
+Gaps Noted           :
+  - Race condition path → requires integration test
+  - Static utility call in line 47 → not mockable
+
+Assumptions Flagged  :
+  - Assumed maxRetries=3 from @Retryable — verify matches properties file
+  - EmailService.send() assumed void — verify signature
+
+JaCoCo Exclusions    : **/mapper/**/*.class added to pom.xml
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+## Step 20 — Hallucination Prevention Guardrails
+
+These rules are **non-negotiable** and checked before every output.
+
+### Pre-Generation Checks
+- [ ] Source file was read — not recalled from memory
+- [ ] Every class name in mocks exists in source imports or is the class under test
+- [ ] Every method name called on `@InjectMocks` subject exists in source
+- [ ] Every `@Value` field in `ReflectionTestUtils` maps to an actual `@Value` in source
+- [ ] No test references a field name not declared in source
+- [ ] Framework APIs used (e.g. `StepVerifier`, `MockMvc`) are confirmed in `pom.xml`
+- [ ] Spring Boot version confirmed before choosing `javax` vs `jakarta`
+
+### Uncertainty Signalling
+When behavior cannot be confirmed from source alone, embed a comment:
+```java
+// VERIFY: assumed this method returns null on missing user — confirm with team
+// VERIFY: assumed maxRetries=3 from @Retryable — check application.properties
+// VERIFY: EmailService.send() assumed to be void — check actual signature
+```
+
+### Forbidden Assumptions
+- Never invent a method that isn't in the source file
+- Never assume a dependency is `@Autowired` without seeing the annotation or constructor
+- Never claim "100% coverage" — only report paths that have explicit test methods written
+- Never use `@SpringBootTest` on a `@Service` test without explicit justification
+- Never mix `javax` and `jakarta` in the same file
+- Never use WireMock, EmbeddedKafka, or H2 unless confirmed in `pom.xml`
+
+---
+
+## Step 21 — Hallucination Coping Strategies
+
+When hallucination is suspected or detected after generation:
+
+### Self-Audit Protocol
+After writing the test class, re-read your own output and verify:
+1. Cross-reference every mocked type against source imports
+2. Cross-reference every method call on the subject against source methods
+3. Cross-reference every `ReflectionTestUtils` field name against source fields
+4. If any mismatch found → correct silently and note in summary under "Corrections Made"
+
+### Graceful Degradation
+When full generation is unsafe:
+
+| Situation | Response |
+|---|---|
+| Heavy AOP / dynamic proxies | Generate skeleton with `// TODO: requires integration test` stubs |
+| Abstract class | Test only concrete methods; note abstract methods as skipped |
+| Heavy reflection in source | Flag as low unit-testability; suggest refactor |
+| Ambiguous overloaded method | Write most conservative test; list alternatives in summary |
+| Generics too complex to infer | Use raw type with `@SuppressWarnings("unchecked")` and comment |
+
+### Escalation Triggers — Agent Must Stop and Ask
+- Source file not found at resolved path
+- `pom.xml` / `build.gradle` missing JUnit 5 entirely
+- Short class name resolves to 2+ files
+- Existing test file appears more complete than what agent would generate
+- Spring Boot version cannot be determined
+- Class uses heavy reflection or runtime proxies throughout
+
+### Conflict Recovery
+If a generated test would not compile (detectable by reviewing imports and method signatures):
+1. Re-read source file
+2. Identify the specific mismatch (wrong method name, wrong return type, missing import)
+3. Correct the test
+4. Add to summary: `Corrections Made: [description of what was fixed]`
+
+---
+
+## Error Handling Reference
+
+| Situation | Action |
+|---|---|
+| Source file not found | Stop. Report the path searched. Ask user to confirm location. |
+| Missing JUnit 5 dependency | Warn. Show the required `pom.xml` dependency block. Do not generate. |
+| Ambiguous class name (2+ matches) | List all matches with full paths. Ask user to select one. |
+| Existing test is more complete | Show test count comparison. Ask: overwrite, append, or skip? |
+| Abstract class target | Test concrete methods only. Document skipped abstract methods. |
+| `@SpringBootTest` justified | Always add `// REASON:` comment explaining why full context is needed. |
+| Static method in critical path | Note as untestable via standard Mockito. Suggest PowerMockito or refactor. |
+| Version undetectable | Ask user: "Is this Spring Boot 2.x or 3.x?" before generating imports. |

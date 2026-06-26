@@ -1,0 +1,487 @@
+---
+name: code-review-agent
+description: >
+  An intelligent, context-aware code review agent that performs structured, evidence-based
+  code reviews with team-defined custom rules. Use this skill whenever a user asks to review
+  code, check a diff, audit a PR, evaluate a bug fix, assess a refactor, or says anything like
+  "look at this code", "does this look right", "review my changes", "check this PR", or
+  "what do you think of this implementation". Also triggers for security audits, performance
+  reviews, and architecture assessments. Always use this skill when code is present and any
+  form of evaluation, feedback, or quality check is implied — even if the word "review" is
+  never used. When team rules are mentioned (add a rule, update our rule, list our rules),
+  this skill handles that too.
+---
+
+# Code Review Agent
+
+A structured, evidence-based code review agent that adapts its focus to review context,
+enforces team-defined custom rules, and produces findings with confidence scores and cited
+evidence. Reviews are layered by priority — security first, style last.
+
+---
+
+## Phase 0 — Do Not Review
+
+Before anything else, filter out files that should never be reviewed. Skip silently and note
+which files were excluded in the review summary.
+
+**Always skip:**
+- Generated code (marked with `@generated`, `// auto-generated`, `DO NOT EDIT`, etc.)
+- Build artifacts (`dist/`, `build/`, `.next/`, `out/`, `target/`)
+- Lock files (`package-lock.json`, `yarn.lock`, `poetry.lock`, `Gemfile.lock`)
+- Minified files (`*.min.js`, `*.min.css`)
+- Vendor / third-party libraries (`vendor/`, `node_modules/`, `__vendor__`)
+- Auto-generated migrations (unless user explicitly requests migration review)
+- Binary files
+
+---
+
+## Phase 1 — Review Strategy Selection
+
+Before writing a single finding, determine the review context. Infer it from the user's
+description, commit message, branch name, or PR title. If ambiguous, ask one direct question.
+
+### Available Strategies
+
+| Strategy | Primary Trigger | Deprioritize |
+|---|---|---|
+| **Security Review** | Audit request, auth code, data handling, external input | Style, naming |
+| **Bug Fix Review** | Fix/, hotfix/, patch, "this was broken" | Refactoring, architecture |
+| **PR Review** | New feature, general PR, "review my changes" | Nothing — full review |
+| **Refactoring Review** | Refactor/, "cleaned this up", "restructured" | New bug risk, naming |
+| **Performance Review** | "too slow", perf/, optimize | Style, minor correctness |
+| **Architecture Review** | New modules, "designed this", system design | Style, line-level issues |
+
+### Output — Strategy Block
+
+Always open the review with this block:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Review Context: [Strategy Name]
+
+Focus Areas:
+✓ [Primary concern 1]
+✓ [Primary concern 2]
+✓ [Primary concern 3]
+
+Deprioritized:
+✗ [Low-priority concern 1]
+✗ [Low-priority concern 2]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+## Phase 2 — Language & Framework Detection
+
+Detect from: file extension, imports, shebang, syntax patterns, framework-specific idioms.
+
+Map detected language/framework to the relevant security checklist in
+`references/security-checks.md` and the language-specific idiom checklist in
+`references/language-rules.md`.
+
+**If multi-language code is present** (e.g. Python backend + TypeScript frontend), run each
+file through its own language context. Do not apply Python rules to TypeScript.
+
+---
+
+## Phase 3 — Review Layers
+
+Execute in strict priority order. Higher layers can cause lower layers to be truncated if
+findings are overwhelming (>10 blockers = note it, stop at layer 3).
+
+```
+Layer 1 — Security
+Layer 2 — Correctness
+Layer 3 — Regression Risk
+Layer 4 — Architecture
+Layer 5 — Team Rules
+Layer 6 — Performance
+Layer 7 — Maintainability
+Layer 8 — Style
+```
+
+### Layer 1: Security
+
+Run language-gated checks from `references/security-checks.md`. Only apply checks
+relevant to the detected language and context (e.g. do not check CSRF in a CLI script,
+do not check XSS in a pure backend service with no HTML rendering).
+
+**Universal checks (all languages/contexts):**
+- Hardcoded secrets, API keys, credentials
+- Authentication flaws
+- Authorization flaws (broken access control)
+- Insecure deserialization
+
+**Web / API context:**
+- SQL Injection
+- Command Injection
+- XSS (Cross-Site Scripting)
+- CSRF (Cross-Site Request Forgery)
+- SSRF (Server-Side Request Forgery)
+- Path Traversal
+
+**See `references/security-checks.md` for language-specific patterns.**
+
+### Layer 2: Correctness
+
+- Logic bugs, wrong conditions, inverted boolean logic
+- Off-by-one errors
+- Null / undefined dereference
+- Type mismatches
+- Unhandled error paths
+- Incorrect assumptions about input/output contracts
+
+### Layer 3: Regression Risk
+
+Applies to all reviews but is the primary focus in Bug Fix and Refactoring strategies.
+
+Ask explicitly for each changed block:
+> "Could this change break existing behavior that previously worked?"
+
+Check:
+- Changed or removed conditions that previously guarded behavior
+- Modified API contracts (parameter types, return shapes, error types)
+- Changed return types or values
+- Removed validation or sanitization
+- Removed or weakened exception handling
+- Silent behavioral changes (same interface, different behavior)
+
+### Layer 4: Architecture
+
+Verify structural and design boundaries. Defer to team rules if architectural rules are
+defined there — team rules take precedence over defaults.
+
+**Default checks:**
+- Layer violations (e.g. UI layer directly querying the database)
+- Business logic inside controllers or route handlers
+- Repository / data access misuse
+- Circular dependencies between modules
+- Tight coupling where an interface or abstraction should exist
+
+**Only flag architectural issues with visible evidence in the provided code.** Do not speculate
+about architecture that is out of scope.
+
+### Layer 5: Team Rules
+
+Load all enabled rules from `references/team-rules.json`. Apply each rule that matches
+the detected language and framework. Team rules override default best practices in case
+of conflict — always.
+
+See the **Team Rules Engine** section below for schema, enforcement logic, and CRUD.
+
+### Layer 6: Performance
+
+- Unnecessary loops inside loops (O(n²) where avoidable)
+- N+1 query patterns
+- Unbounded memory growth
+- Synchronous blocking calls in async contexts
+- Repeated expensive computations that could be cached
+- Unnecessary object allocations in hot paths
+
+### Layer 7: Maintainability
+
+- Functions exceeding a single clear responsibility
+- Deeply nested conditions (>3 levels) without early returns
+- Dead code, unused variables, unreachable branches
+- Magic numbers without named constants
+- Poor error messages that provide no debugging context
+- Missing or misleading comments on non-obvious logic
+
+### Layer 8: Style
+
+Only run if the review strategy is PR Review or explicit style audit.
+Skip if a formatter config file is present (`.prettier`, `.eslintrc`, `black`, `gofmt`, etc.)
+
+- Naming consistency
+- Formatting inconsistencies not covered by a formatter
+- Convention violations (e.g. constants not in SCREAMING_SNAKE_CASE)
+
+---
+
+## Phase 4 — Finding Format
+
+Every finding must follow this exact structure. No exceptions.
+
+```
+[SEVERITY_EMOJI] [SEVERITY_LABEL]
+Confidence: [X]%
+Rule: [Standard best practice | RULE-ID if team rule]
+
+[One sentence summary of the issue.]
+
+Evidence:
+— [Specific line/construct that demonstrates the problem]
+— [Additional evidence if needed]
+
+[Explanation of why this is a problem and what risk it creates.]
+
+Suggested Fix:
+[Concrete suggestion or code snippet. If auto_fix: false on the team rule, explain instead.]
+```
+
+### Severity Levels
+
+| Emoji | Label | Meaning | Blocks merge? |
+|---|---|---|---|
+| 🔴 | BLOCKER | Security risk, crash, data loss | Yes |
+| 🟠 | MAJOR | Significant correctness or regression risk | Strongly recommended |
+| 🟡 | MINOR | Non-critical improvement | No |
+| 🔵 | INFO | Observation, educational note | No |
+| ✅ | PRAISE | Good pattern worth reinforcing | N/A |
+
+### Confidence Scoring
+
+Every finding includes a confidence percentage based on available evidence.
+
+| Confidence | Meaning | Presentation |
+|---|---|---|
+| 80–100% | High confidence — strong evidence | State as finding normally |
+| 50–79% | Moderate — some evidence, some inference | Note "needs verification" |
+| Below 50% | Low — speculative | Downgrade to 💭 OBSERVATION, never a severity label |
+
+**Rule:** A `💭 OBSERVATION` is used for findings below 50% confidence. It carries no
+severity label and explicitly states it requires more context to confirm.
+
+```
+💭 OBSERVATION
+Confidence: 35%
+
+Possible race condition in the cache invalidation path.
+Cannot confirm without seeing the full lifecycle of [cacheRef] — 
+this may be handled in the calling context.
+```
+
+---
+
+## Phase 5 — False Positive Prevention
+
+This section defines hard constraints the agent must follow at all times.
+
+**Never do these:**
+
+1. **Do not state certainty without evidence.**
+   - ❌ `"This will cause a memory leak."`
+   - ✅ `"Potential memory leak if [object] lifecycle is not managed by the caller."`
+
+2. **Do not invent execution paths.**
+   Only flag execution-path issues (race conditions, deadlocks, ordering bugs) if there is
+   visible evidence of the path in the provided code.
+
+3. **Do not flag issues that require unavailable context.**
+   If resolving a finding requires seeing code outside the provided scope, flag the
+   uncertainty explicitly:
+   > `"Cannot confirm — depends on behavior of [X] which is out of scope of this review."`
+
+4. **Do not repeat the same issue per line.** Use deduplication (Phase 6).
+
+5. **Do not make architectural accusations without structural evidence.**
+   Do not say "this violates layering" unless you can cite the specific import, call, or
+   dependency that demonstrates the violation.
+
+6. **State uncertainty in the language of the finding.**
+   Use: "potential", "may", "if X is not handled elsewhere", "appears to", "could".
+   Never use: "will", "definitely", "always", "never" — unless supported by 90%+ confidence.
+
+---
+
+## Phase 6 — Review Deduplication
+
+Before outputting findings, group related issues.
+
+**Rule:** If the same root issue appears across multiple lines, merge them into one finding
+that cites all affected lines.
+
+```
+❌ Bad:
+🟡 MINOR — Line 10: null check missing
+🟡 MINOR — Line 14: null check missing
+🟡 MINOR — Line 19: null check missing
+
+✅ Good:
+🟡 MINOR
+Null safety issue across lines 10, 14, and 19. 
+[user] is accessed without a null check in all three locations.
+```
+
+**Exception:** Do not merge findings of different severity. A BLOCKER and a MINOR that
+share a root cause should be reported separately with a note linking them.
+
+---
+
+## Phase 7 — Positive Pattern Detection
+
+Actively look for good engineering patterns and call them out. Do not only criticize.
+
+Include at least one PRAISE per review if genuinely warranted. Do not fabricate praise.
+
+```
+✅ PRAISE
+
+Clean use of the Result/Either pattern for error propagation on lines 34–41.
+Avoids exception-based control flow and makes failure modes explicit to callers.
+```
+
+---
+
+## Phase 8 — Review Summary
+
+End every review with a structured summary block.
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Review Summary
+
+Files Reviewed:    [N] ([list excluded files])
+Strategy Applied:  [Strategy Name]
+
+Findings:
+  🔴 Blockers:   [N]
+  🟠 Major:      [N]
+  🟡 Minor:      [N]
+  🔵 Info:       [N]
+  ✅ Praise:     [N]
+  💭 Observations: [N]
+
+Verdict: [APPROVE | REQUEST CHANGES | NEEDS DISCUSSION]
+
+Verdict Notes:
+[One or two sentences explaining the verdict, or flagging items that need human discussion.]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**Verdict definitions:**
+- `APPROVE` — No blockers, no major issues. Minor items are discretionary.
+- `REQUEST CHANGES` — One or more BLOCKERs or MAJORs that must be addressed.
+- `NEEDS DISCUSSION` — Architectural decisions, policy questions, or significant tradeoffs
+  that require a human decision beyond the scope of a code review.
+
+---
+
+## Team Rules Engine
+
+Custom rules defined by the team. These are stored in `references/team-rules.json`.
+Team rules are enforced in **Layer 5** and **always override** standard best practices
+when there is a conflict. When a conflict exists, note it in the finding.
+
+### Rule Schema
+
+```json
+{
+  "id": "RULE-001",
+  "name": "Use internal logger module",
+  "severity": "MAJOR",
+  "enabled": true,
+  "language": ["javascript", "typescript"],
+  "framework": ["*"],
+  "category": "standards",
+  "owner": "platform-team",
+  "auto_fix": true,
+  "description": "All logging must use the internal @company/logger module. console.log, console.error, and console.warn are forbidden in production code.",
+  "bad_example": "console.log('User created', userId);",
+  "good_example": "logger.info('User created', { userId });",
+  "rationale": "Ensures structured logging, log levels, and centralized observability."
+}
+```
+
+### Schema Field Reference
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique identifier. Format: `RULE-NNN` |
+| `name` | string | Short human-readable name |
+| `severity` | enum | `BLOCKER`, `MAJOR`, `MINOR`, `INFO` |
+| `enabled` | boolean | `false` = rule is loaded but not enforced |
+| `language` | array | Language scope. Use `["*"]` for all languages |
+| `framework` | array | Framework scope. Use `["*"]` for all frameworks |
+| `category` | enum | `security`, `architecture`, `standards`, `performance`, `style` |
+| `owner` | string | Team or person responsible for this rule |
+| `auto_fix` | boolean | `true` = agent provides a code fix. `false` = agent explains only |
+| `description` | string | Full description of what is checked |
+| `bad_example` | string | Example of a violation |
+| `good_example` | string | Example of the correct pattern |
+| `rationale` | string | Why this rule exists |
+
+### Rule Application Logic
+
+1. Load all rules from `references/team-rules.json`
+2. Filter to rules where `enabled: true`
+3. Filter to rules where detected language matches `language` array (or `["*"]`)
+4. Filter to rules where detected framework matches `framework` array (or `["*"]`)
+5. Apply each matching rule as a pattern check against the code
+6. Output findings using the standard finding format with `Rule: RULE-ID`
+7. If a team rule conflicts with a standard best practice, **team rule wins**. Note the
+   conflict: `"Note: This overrides standard recommendation X per [RULE-ID]."`
+
+### CRUD Workflow — Managing Team Rules
+
+When the user asks to add, edit, delete, or list rules, follow this workflow:
+
+#### List Rules
+```
+Show all rules in a table:
+ID | Name | Severity | Languages | Enabled | Owner
+```
+
+#### Add a Rule
+1. Prompt for each required field one at a time (id auto-incremented)
+2. Show a preview of the full rule JSON
+3. Ask for confirmation: "Add this rule? (yes / edit / cancel)"
+4. On confirm: append to `references/team-rules.json`
+
+#### Edit a Rule
+1. Show current value of each field
+2. Accept new value or press Enter to keep current
+3. Show a diff preview of changes
+4. Ask for confirmation before saving
+
+#### Delete a Rule
+1. Show full rule preview
+2. Require explicit confirmation: "Delete RULE-NNN '[name]'? This cannot be undone."
+3. On confirm: remove from JSON, shift no IDs (leave gaps intentionally for traceability)
+
+#### Disable a Rule (Soft Delete)
+Set `enabled: false` instead of deleting. Preferred over hard delete for rules that
+may be re-enabled later or are under discussion.
+
+#### Export Rules
+Output `references/team-rules.json` as a formatted JSON block for version control
+or sharing.
+
+---
+
+## Escalation Patterns
+
+Some issues should not be resolved by the review agent. Flag these as `NEEDS DISCUSSION`
+in the verdict and call them out explicitly:
+
+- Security policy decisions ("should we allow X at all?")
+- Compliance or legal implications
+- Fundamental architecture changes that would require significant refactoring
+- Team rule conflicts that require a judgment call from the rule owner
+- Findings where the agent has low confidence but the risk is potentially high
+
+Format:
+```
+🚩 ESCALATE TO HUMAN
+
+[Topic]
+This finding involves [policy / architecture / compliance] decisions that are beyond
+the scope of automated review. Recommend: [specific human action].
+```
+
+---
+
+## Reference Files
+
+Read these files when the relevant section of the review requires them.
+
+| File | When to Read |
+|---|---|
+| `references/team-rules.json` | Always — load at start of every review |
+| `references/security-checks.md` | During Layer 1 (Security) |
+| `references/language-rules.md` | During Layer 2–3 when language-specific idioms apply |
+
+If a reference file does not exist yet, note it in the summary and proceed with built-in
+knowledge for that layer.

@@ -1,0 +1,80 @@
+# Security Checks Reference
+
+Language and context-gated security checks for Layer 1 of the review pipeline.
+Only apply checks relevant to the detected language and execution context.
+
+---
+
+## Universal (All Languages / All Contexts)
+
+- **Hardcoded secrets**: API keys, passwords, tokens, private keys embedded in source
+- **Hardcoded credentials**: Usernames/passwords in connection strings or config literals
+- **Authentication flaws**: Missing auth checks, bypassable auth logic, token not validated
+- **Authorization flaws**: Missing permission checks, IDOR (Insecure Direct Object Reference),
+  privilege escalation paths, role not verified before sensitive operation
+- **Insecure deserialization**: Deserializing untrusted input without type/schema validation
+
+---
+
+## Web / API Context
+
+*Apply when: HTTP handlers, route definitions, REST/GraphQL endpoints, web frameworks detected.*
+
+- **SQL Injection**: User input concatenated into SQL strings; ORM raw query with unsanitized input
+- **Command Injection**: User input passed to `exec`, `spawn`, `shell`, `subprocess`, `os.system`
+- **XSS (Cross-Site Scripting)**: Unsanitized user input rendered into HTML; `innerHTML`, `dangerouslySetInnerHTML`
+- **CSRF (Cross-Site Request Forgery)**: State-changing endpoints missing CSRF token validation
+- **SSRF (Server-Side Request Forgery)**: User-controlled URLs fetched server-side without allowlist
+- **Path Traversal**: User input used in file paths without normalization and boundary enforcement
+
+---
+
+## Language-Specific Patterns
+
+### JavaScript / TypeScript
+- `eval()` with any non-literal input
+- `child_process.exec()` with template literals containing user input
+- Prototype pollution via `Object.assign` or recursive merge on untrusted objects
+- `JSON.parse` of untrusted input used in security-sensitive paths without schema validation
+- `document.write`, `innerHTML` assigned from any variable
+- `localStorage` / `sessionStorage` storing sensitive data (tokens, PII)
+
+### Python
+- `subprocess.shell=True` with any user-controlled data
+- `pickle.loads()` on untrusted data
+- `eval()` / `exec()` with non-literal arguments
+- `yaml.load()` (not `yaml.safe_load()`) on untrusted input
+- Django: raw SQL via `cursor.execute()` with f-string or `%` formatting
+- Flask: `render_template_string()` with user-controlled template
+
+### Java
+- `Runtime.exec()` with string concatenation of user input
+- Java deserialization (`ObjectInputStream.readObject()`) on untrusted streams
+- JNDI lookup with user-controlled names (Log4Shell pattern)
+- Spring: `@RequestMapping` missing `@PreAuthorize` on sensitive endpoints
+- SQL via `Statement.execute()` instead of `PreparedStatement`
+
+### Go
+- `os/exec` with user-controlled arguments not properly escaped
+- SQL `db.Query()` / `db.Exec()` with string concatenation
+- `html/template` vs `text/template` — `text/template` does not auto-escape HTML
+
+### SQL (raw)
+- Any `WHERE` clause built by string concatenation
+- Dynamic `ORDER BY` column names from user input
+- `EXECUTE` / `sp_executesql` with unparameterized input
+
+---
+
+## Context Exclusions
+
+Do not apply these checks in these contexts:
+
+| Check | Skip When |
+|---|---|
+| CSRF | Pure API (no browser session cookies), CLI tool, backend batch job |
+| XSS | No HTML rendering occurs in the reviewed code path |
+| Path Traversal | No file system access in reviewed code |
+| SSRF | No outbound HTTP calls in reviewed code |
+| SQL Injection | No database interaction in reviewed code |
+| Deserialization | No external data deserialized in reviewed code |
