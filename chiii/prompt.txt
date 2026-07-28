@@ -1,0 +1,33 @@
+Here's a structured prompt you can use (in Claude, or any diagramming/AI tool) to generate this flowchart:
+
+---
+
+**Prompt:**
+
+> Create a flowchart of an agentic software development pipeline with the following structure:
+>
+> **Orchestrator Agent** sits at the center/top, routing between all stages, aggregating a shared confidence ledger (CONFIRMED / PROBABLE / SPECULATIVE) from each agent, and holding pipeline state (RUNNING / PASSED / FAILED / PENDING_HUMAN_REVIEW).
+>
+> **Sequential stages, each a distinct agent, flowing top to bottom:**
+> 1. Spec Decomposition Agent — Jira ticket/epic → structured task + acceptance criteria
+> 2. Architecture/Design Review Agent — validates approach against existing patterns → **[Conditional Human Gate: only if PROBABLE/SPECULATIVE or ADR-worthy]**
+> 3. Code Generation Agent — two-phase: (a) explains logic/approach first → **[Conditional Human Gate: only if plan includes PROBABLE/SPECULATIVE assumptions]** → (b) generates code
+> 4. Build/Compile Check Agent — fast pass/fail gate, no human involved
+> 5. Static Analysis/Lint Agent (SonarQube) — CONFIRMED security findings loop back to stage 3; minor findings annotate and continue
+> 6. Test Generation Agent — writes tests for uncovered code paths
+> 7. Unit Testing Agent — runs tests
+> 8. Debugging Agent — on test failure, attempts fix, loops back to stage 3 codegen; **[Human Gate: triggers after N failed retry loops]**
+> 9. Refactoring Agent — optional, runs only on green tests
+> 10. Code Review Agent — pre-annotates diff with confidence-tiered findings → **[Mandatory Human Gate: always, regardless of confidence tier]**
+> 11. Documentation Agent — generates/updates docs after final approval
+>
+> **Visual requirements:**
+> - Use a distinct color/shape for human gates (e.g., diamond/octagon in a warning color) vs. agent stages (rectangles)
+> - Show the debugging→codegen feedback loop and the SonarQube→codegen feedback loop as backward arrows
+> - Show the orchestrator as a connected control layer above/beside the stages, not just one node in the sequence
+> - Label each human gate with its trigger condition (conditional vs. mandatory)
+> - Include a small legend: agent stage / conditional human gate / mandatory human gate / feedback loop
+
+---
+
+Want me to go ahead and render this as an actual diagram right now instead of just handing you the prompt?
