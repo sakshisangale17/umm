@@ -1,0 +1,9 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "Team-defined custom rules for the code review agent. Rules are applied in Layer 5 of the review pipeline and override standard best practices.",
+    "last_updated": "",
+    "managed_by": "code-review-agent SKILL.md — Team Rules Engine"
+  },
+  "rules": []
+}
